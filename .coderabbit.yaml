@@ -1,0 +1,409 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit configuration for TUnit (.NET / C# test framework).
+#
+# Besides the TUnit project rules (AOT/trimming safety, source-generator and
+# reflection parity, hot-path allocations, Microsoft.Testing.Platform only),
+# this config adds review rules for a telecom company that uses TUnit to test
+# carrier-grade services: subscriber-data privacy (MSISDN/IMSI/IMEI/ICCID, CDRs,
+# CPNI), deterministic tests for network protocols (SIP, Diameter, SMPP, GTP),
+# resilience under timeouts and partial failure, observability, and supply-chain
+# hygiene.
+
+language: en-US
+
+tone_instructions: >-
+  Be a concise senior .NET reviewer for a telecom org. Rank issues: correctness,
+  subscriber-data privacy, AOT/trimming, perf. Cite file and line, give one
+  concrete fix, and skip style nits that .editorconfig already enforces.
+
+early_access: false
+
+reviews:
+  profile: assertive
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  review_status: true
+  commit_status: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  auto_apply_labels: false
+  suggested_reviewers: true
+  poem: false
+  abort_on_close: true
+
+  labeling_instructions:
+    - label: aot
+      instructions: >-
+        Apply when the change touches reflection, dynamic code, generic
+        instantiation, or [DynamicallyAccessedMembers]/[RequiresUnreferencedCode]
+        annotations, or anything that affects Native AOT or trimming.
+    - label: source-generator
+      instructions: >-
+        Apply when files under src/*SourceGenerator* change, or generator
+        snapshot (.verified.txt) files change.
+    - label: public-api
+      instructions: >-
+        Apply when the public API surface changes (tests/TUnit.PublicAPI
+        snapshots change, or public types and members are added, removed, or
+        changed).
+    - label: performance
+      instructions: >-
+        Apply when the change affects discovery, scheduling, execution,
+        data-source generation, or assertion hot paths, or adds benchmarks.
+    - label: privacy
+      instructions: >-
+        Apply when the change could log, capture, persist, or report subscriber
+        identifiers (MSISDN, IMSI, IMEI, ICCID, SUPI/SUCI), call detail records,
+        location data, or CPNI, including through test output, HTML reports,
+        OpenTelemetry attributes, or captured HTTP requests.
+    - label: dependencies
+      instructions: >-
+        Apply when Directory.Packages.props, *.csproj PackageReference entries,
+        global.json, or renovate.json change.
+
+  path_filters:
+    - "!**/bin/**"
+    - "!**/obj/**"
+    - "!**/*.received.txt"
+    - "!**/*.Designer.cs"
+    - "!**/*.g.cs"
+    - "!**/*.generated.cs"
+    - "!**/Generated/**"
+    - "!docs/yarn.lock"
+    - "!docs/node_modules/**"
+    - "!docs/build/**"
+    - "!assets/**"
+    - "!.github/pr-assets/**"
+    - "!**/*.snk"
+    - "!**/*.png"
+    - "!**/*.svg"
+    - "!**/*.gif"
+
+  path_instructions:
+    # ---------------------------------------------------------------- Core
+    - path: "src/**/*.cs"
+      instructions: |
+        Library code ships to every consumer, including telecom teams running
+        large regression suites in CI and on constrained build agents.
+        - Native AOT and trimming: flag new reflection (Type.GetType, Activator,
+          MakeGenericType, GetMethod, Expression.Compile, dynamic) that has no
+          [DynamicallyAccessedMembers], [RequiresUnreferencedCode], or
+          [RequiresDynamicCode] annotation. Prefer source-generated paths.
+        - Async: never block on async (.Result, .Wait(), GetAwaiter().GetResult()).
+          Prefer ValueTask for operations that often complete synchronously. Pass
+          CancellationToken through. Use ConfigureAwait(false) in library code
+          that does not need a synchronization context.
+        - Hot paths (discovery, scheduling, execution, data generation): flag LINQ
+          in loops, closures that capture in tight loops, boxing, string
+          concatenation in loops, uncached reflection, and needless allocations.
+          Ask for benchmark evidence (benchmarks/) when the change claims a
+          performance gain.
+        - Concurrency: test runs are highly parallel. Flag shared mutable static
+          state, lock-free code that is not correct, lock(this), async void, and
+          races in ConcurrentDictionary.GetOrAdd factories that have side effects.
+        - Use Microsoft.Testing.Platform APIs only. Flag any
+          Microsoft.VisualStudio.TestPlatform (VSTest) usage.
+        - Nullable reference types are enabled. Flag `!` suppressions that
+          have no justification.
+        - Public API: changed public members need XML docs and an updated
+          tests/TUnit.PublicAPI snapshot. Call out breaking changes explicitly.
+
+    - path: "src/TUnit.Engine/**"
+      instructions: |
+        Metadata collection here must behave the same as
+        src/TUnit.Core.SourceGenerator (reflection mode and source-gen mode).
+        When discovery or metadata logic changes in one place, check for the
+        matching change in the other place and for tests that cover both modes.
+        Check timeout and cancellation handling carefully. A hung test must
+        never hang the whole run. Telecom suites often have long-running
+        protocol and soak tests.
+
+    - path: "src/**/*SourceGenerator*/**/*.cs"
+      instructions: |
+        Roslyn incremental source generator rules:
+        - Pipelines must be incremental and cacheable. Do not keep ISymbol,
+          SyntaxNode, Compilation, or SemanticModel in pipeline outputs; use
+          equatable value records or EquatableArray.
+        - Generated code must use fully qualified global:: names, carry
+          #nullable enable and [GeneratedCode] or an auto-generated header, and
+          be deterministic (stable ordering, no timestamps, no GUIDs).
+        - Generated code must stay AOT-safe and must not add reflection.
+        - Behavior must match TUnit.Engine reflection mode.
+        - Changes to generator output need updated .verified.txt snapshots.
+          Never commit .received.txt.
+        - Check the Roslyn version-specific projects (Roslyn44/47/414) for API
+          availability.
+
+    - path: "src/**/*Analyzers*/**/*.cs"
+      instructions: |
+        Diagnostics need a stable ID, a correct category and severity, a help
+        link, and analyzer tests. Analyzers must be cheap: register narrow
+        syntax or operation actions, call EnableConcurrentExecution, and set
+        ConfigureGeneratedCodeAnalysis. Code fixes must keep trivia and must
+        support FixAll where it makes sense.
+
+    - path: "src/TUnit.Assertions/**/*.cs"
+      instructions: |
+        Prefer [GenerateAssertion] for new assertions. Failure messages must be
+        clear and deterministic. Telecom engineers diff them in CI logs.
+        Failure messages must not dump whole objects that may hold subscriber
+        data. Assertions over time, durations, or retry windows must take
+        tolerances and must not depend on wall-clock timing.
+
+    # --------------------------------------- Telecom-relevant integrations
+    - path: "src/TUnit.OpenTelemetry/**"
+      instructions: |
+        Telecom operators feed test telemetry into shared observability
+        platforms. Check that:
+        - Span and attribute names follow OpenTelemetry semantic conventions,
+          and ActivitySource and Meter names are stable and versioned.
+        - No attribute, event, or baggage carries test arguments or payloads
+          that may hold subscriber identifiers (MSISDN, IMSI, IMEI, ICCID,
+          SUPI), IP addresses, or location data unless the user opts in
+          explicitly and the data is redacted.
+        - High-cardinality values (per-test GUIDs, raw parameters) are not used
+          as metric dimensions.
+        - Exporter failures or back-pressure can never fail or slow the test
+          run.
+
+    - path: "src/TUnit.Mocks.Http/**"
+      instructions: |
+        Captured requests and responses may hold auth headers, tokens, and
+        subscriber payloads from BSS/OSS or network-function APIs (for example
+        3GPP SBA/5GC REST APIs or TMF Open APIs). Flag code that logs or
+        renders Authorization, Cookie, X-Api-Key, or similar headers without
+        redaction. Request matching must be deterministic and thread-safe
+        under parallel tests.
+
+    - path: "src/{TUnit.AspNetCore,TUnit.AspNetCore.Core,TUnit.Aspire,TUnit.Aspire.Core}/**"
+      instructions: |
+        These hosts run integration tests against real service graphs
+        (databases, brokers, network-function simulators). Check that
+        resources are disposed in the right order, ports are not hard-coded,
+        startup and health checks have timeouts, and no secrets or connection
+        strings reach logs or test output.
+
+    - path: "src/TUnit.Reporting.Tool/**"
+      instructions: |
+        Reports may be archived for audit and regulatory evidence (for example
+        release sign-off for network changes). Output must be deterministic and
+        must HTML-encode or escape all user-controlled text (test names,
+        arguments, exception messages) to prevent XSS. Reports must not embed
+        secrets or subscriber identifiers.
+
+    # ------------------------------------------------------------ Tests
+    - path: "tests/**/*.cs"
+      instructions: |
+        - Tests must be deterministic: no fixed Thread.Sleep or Task.Delay for
+          synchronization, no reliance on wall-clock time, test order, or
+          machine locale. Use TimeProvider or fake clocks and invariant culture.
+        - Network and protocol tests (SIP, Diameter, SMPP, GTP, HTTP/2, gRPC)
+          must use in-process fakes or ephemeral ports, never fixed ports or
+          public hosts. Cover timeouts, retries with back-off, duplicate and
+          out-of-order messages, and partial failures.
+        - Test data must be synthetic. Flag real-looking phone numbers, IMSIs,
+          IMEIs, ICCIDs, names, or addresses. Prefer reserved or fictional
+          ranges (for example the 001-01 test PLMN, or numbers set aside for
+          drama and fiction).
+        - Snapshot (.verified.txt) changes must be intentional and match the
+          code change.
+        - tests/TUnit.TestProject has intentional failures. Do not "fix" them,
+          and make sure new failing samples are marked as expected.
+
+    - path: "tests/TUnit.PublicAPI/**"
+      instructions: |
+        Each public API change here must be intentional. Point out removed or
+        changed members as possible breaking changes for downstream consumers,
+        and ask for a migration note in the PR description.
+
+    - path: "**/*.verified.txt"
+      instructions: |
+        Approved snapshot. Check that the diff matches the code change and has
+        no machine-specific paths, timestamps, or non-deterministic ordering.
+
+    # ------------------------------------------------- Build & supply chain
+    - path: "{Directory.Packages.props,Directory.Build.props,Directory.Build.targets,global.json,**/*.csproj,**/*.fsproj}"
+      instructions: |
+        Central Package Management is in use, so versions belong in
+        Directory.Packages.props, not in individual csproj files. For new or
+        upgraded dependencies, check the license (telecom procurement usually
+        rejects copyleft licenses in shipped binaries), maintenance status,
+        known CVEs, and whether the package is AOT/trim compatible. Flag
+        floating or prerelease versions in shipped packages, disabled warnings
+        (NoWarn) without justification, and changes to TreatWarningsAsErrors,
+        Deterministic, or SourceLink settings.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        Pin third-party actions to a full commit SHA. Use least-privilege
+        `permissions:`. Never interpolate untrusted input
+        (github.event.*.title/body, head_ref) straight into run: scripts. Be
+        careful with pull_request_target. Secrets must not be echoed or passed
+        to forked-PR jobs.
+
+    - path: "{scripts,eng,tools}/**/*.{ps1,sh}"
+      instructions: |
+        Scripts must fail fast ($ErrorActionPreference = 'Stop' or set -euo
+        pipefail), quote paths, avoid destructive commands without guards, and
+        never print secrets.
+
+    # --------------------------------------------------------------- Docs
+    - path: "docs/**/*.{md,mdx}"
+      instructions: |
+        C# code fences are compiled in CI with warnings as errors, so check
+        that snippets are complete and correct. Examples in telecom-flavored
+        docs must use fictional subscriber data. Keep wording clear and
+        consistent with the current API names.
+
+    - path: "examples/**"
+      instructions: |
+        Examples are copied into real projects. They must show best practice:
+        async all the way, proper disposal, no hard-coded secrets or
+        connection strings, and synthetic data only.
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    base_branches:
+      - main
+      - "release/.*"
+    ignore_title_keywords:
+      - "WIP"
+      - "[skip review]"
+      - "chore(deps)"
+    ignore_usernames:
+      - "renovate[bot]"
+      - "dependabot[bot]"
+
+  finishing_touches:
+    docstrings:
+      enabled: true
+    unit_tests:
+      enabled: true
+
+  pre_merge_checks:
+    docstrings:
+      mode: warning
+      threshold: 80
+    title:
+      mode: warning
+      requirements: >-
+        Imperative, under 72 characters, describes the user-visible change.
+    description:
+      mode: warning
+    issue_assessment:
+      mode: warning
+    custom_checks:
+      - name: "Subscriber data privacy"
+        mode: error
+        instructions: >-
+          Fail if the PR adds code, tests, fixtures, docs, or snapshots that
+          contain or log realistic subscriber identifiers (MSISDN/E.164 numbers,
+          IMSI, IMEI, ICCID, SUPI/SUCI), CDR contents, location data, or
+          credentials, or that sends test arguments or HTTP payloads to logs,
+          reports, or OpenTelemetry without redaction. Synthetic values from
+          clearly fictional or test ranges are fine.
+      - name: "AOT and trimming safety"
+        mode: error
+        instructions: >-
+          Fail if the PR adds reflection or dynamic code in src/ without
+          [DynamicallyAccessedMembers], [RequiresUnreferencedCode], or
+          [RequiresDynamicCode] annotations, or adds an IL2xxx/IL3xxx warning
+          suppression without justification.
+      - name: "Source-gen / reflection parity"
+        mode: warning
+        instructions: >-
+          If test discovery or metadata collection changes in
+          src/TUnit.Engine or src/TUnit.Core.SourceGenerator, check that the
+          other mode has the matching change and that tests cover both modes.
+          Pass if neither area is touched.
+      - name: "Resilience and determinism"
+        mode: warning
+        instructions: >-
+          Flag new blocking-on-async calls, Thread.Sleep or fixed Task.Delay
+          used for synchronization, hard-coded network ports or hosts, missing
+          CancellationToken propagation in async APIs, and network calls with
+          no timeout.
+      - name: "Public API and snapshots"
+        mode: warning
+        instructions: >-
+          If public API or source-generator output changes, check that
+          tests/TUnit.PublicAPI or the matching .verified.txt snapshots are
+          updated in the same PR and that no .received.txt files are committed.
+
+  tools:
+    github-checks:
+      enabled: true
+    gitleaks:
+      enabled: true
+    semgrep:
+      enabled: true
+    osvScanner:
+      enabled: true
+    actionlint:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    hadolint:
+      enabled: true
+    checkov:
+      enabled: true
+    languagetool:
+      enabled: true
+      level: default
+    ast-grep:
+      essential_rules: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+      - ".github/copilot-instructions.md"
+      - ".github/CONTRIBUTING.md"
+      - ".claude/docs/**/*.md"
+      - ".editorconfig"
+  learnings:
+    scope: auto
+  issues:
+    scope: auto
+  pull_requests:
+    scope: auto
+
+code_generation:
+  docstrings:
+    language: en-US
+    path_instructions:
+      - path: "src/**/*.cs"
+        instructions: >-
+          Use C# XML doc comments (<summary>, <param>, <returns>,
+          <exception>). Document thread-safety, cancellation behavior, and AOT
+          or trimming requirements where they apply. Use fictional data in
+          <example> blocks.
+  unit_tests:
+    path_instructions:
+      - path: "src/**/*.cs"
+        instructions: >-
+          Write tests with TUnit itself ([Test], [Arguments],
+          [MethodDataSource], and await Assert.That(...)). Use TUnit.Mocks for
+          test doubles. Tests must be deterministic, parallel-safe, and use
+          synthetic data only.
