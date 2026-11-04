@@ -114,6 +114,36 @@ public class RequestJournalTests
     }
 
     [Test]
+    public async Task DescribeRequests_RedactsUserInfoAndFragmentCredentials()
+    {
+        using var client = Mock.HttpClient();
+
+        await client.GetAsync($"http://bss-user:{AccessToken}@localhost{AmDataPath}#access_token={AccessToken}&view=full");
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains(
+            $"GET http://[REDACTED]@localhost{AmDataPath}#access_token=[REDACTED]&view=full");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+        await Assert.That(journal).DoesNotContain("bss-user");
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsCredentialsInsideUriValuedHeaders()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.Referrer = new Uri($"https://portal.test/callback?access_token={AccessToken}&step=2");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Referer: https://portal.test/callback?access_token=[REDACTED]&step=2");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
     public async Task VerifyNoUnmatchedRequests_UnmatchedListRedactsQueryCredentials()
     {
         using var client = Mock.HttpClient("http://localhost");
