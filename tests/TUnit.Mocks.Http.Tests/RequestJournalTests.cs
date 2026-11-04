@@ -1,0 +1,461 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
+using TUnit.Mocks;
+using TUnit.Mocks.Exceptions;
+using TUnit.Mocks.Http;
+
+namespace TUnit.Mocks.Http.Tests;
+
+/// <summary>
+/// Tests for the request journal (<see cref="MockHttpHandler.DescribeRequests"/>),
+/// using a subscriber-profile lookup against a 5G UDM-style API as the scenario.
+/// All subscriber data is synthetic: the IMSI is in the 001-01 test network and the
+/// MSISDN is in the 555-0100 to 555-0199 range reserved for fictional use.
+/// </summary>
+public class RequestJournalTests
+{
+    private const string Imsi = "001010000000001";
+    private const string Msisdn = "+12065550123";
+    private const string AccessToken = "test-token-not-a-real-credential";
+    private const string AmDataPath = $"/nudm-sdm/v2/imsi-{Imsi}/am-data";
+
+    [Test]
+    public async Task DescribeRequests_WhenNoRequests_SaysSo()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+
+        await Assert.That(client.Handler.DescribeRequests()).IsEqualTo("(no requests captured)");
+    }
+
+    [Test]
+    public async Task DescribeRequests_IncludesMethodUriStatusAndHeaders()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.DefaultRequestHeaders.Add("X-Correlation-Id", "corr-42");
+        client.Handler
+            .OnRequest(r => r.Method(HttpMethod.Patch).Path(AmDataPath))
+            .Respond(HttpStatusCode.NoContent);
+
+        await client.SendAsync(new HttpRequestMessage(HttpMethod.Patch, AmDataPath)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/merge-patch+json")
+        });
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).StartsWith("#1 [");
+        await Assert.That(journal).Contains($"PATCH http://localhost{AmDataPath} (matched)");
+        await Assert.That(journal).Contains("X-Correlation-Id: corr-42");
+        await Assert.That(journal).Contains("Content-Type: application/merge-patch+json; charset=utf-8");
+    }
+
+    [Test]
+    public async Task DescribeRequests_UsesInvariantUtcTimestamp()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+
+        await client.GetAsync(AmDataPath);
+
+        var request = client.Handler.Requests[0];
+        var expected = request.Timestamp.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+
+        await Assert.That(client.Handler.DescribeRequests()).StartsWith($"#1 [{expected}] ");
+    }
+
+    [Test]
+    [Arguments("Authorization")]
+    [Arguments("Proxy-Authorization")]
+    [Arguments("Cookie")]
+    [Arguments("X-Api-Key")]
+    [Arguments("X-Auth")]
+    [Arguments("X-Auth-Token")]
+    [Arguments("X-Session-Id")]
+    public async Task DescribeRequests_RedactsCredentialHeaders(string headerName)
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation(headerName, AccessToken);
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains($"{headerName}: [REDACTED]");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsBearerToken()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AccessToken);
+
+        await client.GetAsync(AmDataPath);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Authorization: [REDACTED]");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsCredentialQueryParameters()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+
+        await client.GetAsync($"{AmDataPath}?api_key={AccessToken}&supported-features=1a&access_token={AccessToken}#top");
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains(
+            $"GET http://localhost{AmDataPath}?api_key=[REDACTED]&supported-features=1a&access_token=[REDACTED]#top");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsUserInfoAndFragmentCredentials()
+    {
+        using var client = Mock.HttpClient();
+
+        await client.GetAsync($"http://bss-user:{AccessToken}@localhost{AmDataPath}#access_token={AccessToken}&view=full");
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains(
+            $"GET http://[REDACTED]@localhost{AmDataPath}#access_token=[REDACTED]&view=full");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+        await Assert.That(journal).DoesNotContain("bss-user");
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsCredentialsInsideUriValuedHeaders()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.Referrer = new Uri($"https://portal.test/callback?access_token={AccessToken}&step=2");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Referer: https://portal.test/callback?access_token=[REDACTED]&step=2");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsCredentialsInsideRelativeUriValuedHeaders()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation("Referer", $"/callback?access_token={AccessToken}&step=2#sig={AccessToken}");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Referer: /callback?access_token=[REDACTED]&step=2#sig=[REDACTED]");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsCredentialsInsideUnlistedUrlValuedHeaders()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation("X-Callback-Url", $"https://portal.test/callback?access_token={AccessToken}&step=2");
+        request.Headers.TryAddWithoutValidation("X-Return-To", $"/done?code={AccessToken}");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("X-Callback-Url: https://portal.test/callback?access_token=[REDACTED]&step=2");
+        await Assert.That(journal).Contains("X-Return-To: /done?code=[REDACTED]");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsUserInfoInNetworkPathHeaders()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation("Referer", $"//provisioner:{AccessToken}@portal.test/callback?step=2");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Referer: //[REDACTED]@portal.test/callback?step=2");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+        await Assert.That(journal).DoesNotContain("provisioner");
+    }
+
+    [Test]
+    public async Task DescribeRequests_LeavesNonUriHeaderValuesUnchanged()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation("X-Correlation-Id", "corr-42");
+        request.Headers.TryAddWithoutValidation("X-Client", "udm-client/1.0 (synthetic; build=7)");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("X-Correlation-Id: corr-42");
+        await Assert.That(journal).Contains("X-Client: udm-client/1.0 (synthetic; build=7)");
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsCredentialsInRelativeRequestUri()
+    {
+        // Invoke the handler directly so the request URI is never resolved against a base address.
+        var handler = Mock.HttpHandler();
+        using var invoker = new HttpMessageInvoker(handler);
+        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri($"{AmDataPath}?api_key={AccessToken}", UriKind.Relative));
+
+        using var _ = await invoker.SendAsync(request, CancellationToken.None);
+
+        var journal = handler.DescribeRequests();
+
+        await Assert.That(journal).Contains($"GET {AmDataPath}?api_key=[REDACTED] (UNMATCHED)");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task VerifyNoUnmatchedRequests_UnmatchedListRedactsQueryCredentials()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+
+        await client.GetAsync($"{AmDataPath}?token={AccessToken}");
+
+        var exception = Assert.Throws<MockVerificationException>(() => client.Handler.VerifyNoUnmatchedRequests());
+
+        await Assert.That(exception.Message).Contains($"  - GET http://localhost{AmDataPath}?token=[REDACTED]");
+        await Assert.That(exception.Message).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task ThrowOnUnmatched_MessageRedactsQueryCredentials()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.ThrowOnUnmatched();
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(
+            async () => await client.GetAsync($"{AmDataPath}?sig={AccessToken}"));
+
+        await Assert.That(exception!.Message).Contains("?sig=[REDACTED]");
+        await Assert.That(exception.Message).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_OmitsBodiesByDefault()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        var body = $$"""{"msisdn":"{{Msisdn}}"}""";
+
+        await client.PostAsync(AmDataPath, new StringContent(body));
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains($"Body: <{body.Length} chars omitted>");
+        await Assert.That(journal).DoesNotContain(Msisdn);
+    }
+
+    [Test]
+    public async Task DescribeRequests_IncludesBodiesWhenEnabled()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.IncludeBodiesInDiagnostics();
+
+        var body = $$"""{"supi":"imsi-{{Imsi}}","plmnId":{"mcc":"001","mnc":"01"},"msisdn":"{{Msisdn}}","password":"{{AccessToken}}","ratTypes":["NR",1,true,null]}""";
+        await client.PostAsync(AmDataPath, new StringContent(body, Encoding.UTF8, "application/json"));
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains(
+            """Body: {"supi":"[REDACTED]","plmnId":{"mcc":"001","mnc":"01"},"msisdn":"[REDACTED]","password":"[REDACTED]","ratTypes":["NR",1,true,null]}""");
+        await Assert.That(journal).DoesNotContain(Msisdn);
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsNestedSensitiveValuesWhole()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.IncludeBodiesInDiagnostics();
+
+        var body = $$"""{"gpsi":["msisdn-{{Msisdn}}"],"auth":{"key":"{{AccessToken}}"},"step":2}""";
+        await client.PostAsync(AmDataPath, new StringContent(body, Encoding.UTF8, "application/problem+json"));
+
+        await Assert.That(client.Handler.DescribeRequests())
+            .Contains("""Body: {"gpsi":"[REDACTED]","auth":"[REDACTED]","step":2}""");
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsFormEncodedBodies()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.IncludeBodiesInDiagnostics();
+
+        await client.PostAsync(AmDataPath, new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["grant_type"] = "client_credentials",
+            ["client_secret"] = AccessToken,
+            ["msisdn"] = Msisdn,
+        }));
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Body: grant_type=client_credentials&client_secret=[REDACTED]&msisdn=[REDACTED]");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    [Arguments("text/plain", "msisdn=+12065550123")]
+    [Arguments("application/json", "{\"msisdn\": ")]
+    public async Task DescribeRequests_OmitsBodiesThatCannotBeRedacted(string mediaType, string body)
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.IncludeBodiesInDiagnostics();
+
+        await client.PostAsync(AmDataPath, new StringContent(body, Encoding.UTF8, mediaType));
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains($"Body: <{body.Length} chars omitted>");
+        await Assert.That(journal).DoesNotContain(Msisdn);
+    }
+
+    [Test]
+    public async Task DescribeRequests_TruncatesLongBodies()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.IncludeBodiesInDiagnostics(maxLength: 16);
+
+        var body = $$"""{"note":"{{new string('x', 100)}}"}""";
+        await client.PostAsync("/cdr/batch", new StringContent(body, Encoding.UTF8, "application/json"));
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Body: {\"note\":\"" + new string('x', 7) + "...");
+        await Assert.That(journal).DoesNotContain(new string('x', 8));
+    }
+
+    [Test]
+    public async Task IncludeBodiesInDiagnostics_RejectsNegativeLength()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => client.Handler.IncludeBodiesInDiagnostics(-1));
+
+        await Assert.That(client.Handler.Requests).IsEmpty();
+    }
+
+    [Test]
+    public async Task DescribeRequests_MarksUnmatchedRequests()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.OnGet(AmDataPath).RespondWithJson("{}");
+
+        await client.GetAsync(AmDataPath);
+        await client.GetAsync($"/nudm-sdm/v2/imsi-{Imsi}/sms-data");
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("am-data (matched)");
+        await Assert.That(journal).Contains("\n#2 [");
+        await Assert.That(journal).Contains("sms-data (UNMATCHED)");
+    }
+
+    [Test]
+    public async Task VerifyNoUnmatchedRequests_FailureMessageIncludesJournal()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AccessToken);
+
+        await client.PostAsync(
+            $"/nudm-uecm/v1/imsi-{Imsi}/registrations/amf-3gpp-access",
+            new StringContent("""{"amfInstanceId":"amf-test-01"}""", Encoding.UTF8, "application/json"));
+
+        var exception = Assert.Throws<MockVerificationException>(() => client.Handler.VerifyNoUnmatchedRequests());
+
+        await Assert.That(exception.Message).Contains("Request journal:");
+        await Assert.That(exception.Message).Contains("amf-3gpp-access (UNMATCHED)");
+        await Assert.That(exception.Message).Contains("Authorization: [REDACTED]");
+        await Assert.That(exception.Message).DoesNotContain(AccessToken);
+        await Assert.That(exception.Message).DoesNotContain("amf-test-01");
+    }
+
+    [Test]
+    public async Task DiagnosticsRedactCredentialsInUrlsNestedInQueryParameters()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation(
+            "X-Return-To",
+            "/done?next=" + Uri.EscapeDataString($"https://provisioner:{AccessToken}@portal.test/home")
+                + "&then=" + Uri.EscapeDataString($"https://portal.test/cb?access_token={AccessToken}")
+                + "&home=" + Uri.EscapeDataString("https://portal.test/home"));
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+        var exception = Assert.Throws<MockVerificationException>(() => client.Handler.VerifyNoUnmatchedRequests());
+
+        await Assert.That(journal).Contains("next=" + Uri.EscapeDataString("https://[REDACTED]@portal.test/home"));
+        await Assert.That(journal).Contains("then=" + Uri.EscapeDataString("https://portal.test/cb?access_token=[REDACTED]"));
+        await Assert.That(journal).Contains("home=" + Uri.EscapeDataString("https://portal.test/home"));
+
+        foreach (var output in new[] { journal, exception.Message })
+        {
+            await Assert.That(output).DoesNotContain(AccessToken);
+            await Assert.That(output).DoesNotContain("provisioner");
+        }
+    }
+
+    [Test]
+    public async Task DiagnosticsRedactSubscriberIdentifierQueryParameters()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+
+        await client.GetAsync($"/nnrf-disc/v1/nf-instances?target-nf-type=UDM&supi=imsi-{Imsi}&gpsi=msisdn-{Msisdn.TrimStart('+')}");
+
+        var journal = client.Handler.DescribeRequests();
+        var exception = Assert.Throws<MockVerificationException>(() => client.Handler.VerifyNoUnmatchedRequests());
+
+        await Assert.That(journal).Contains("/nnrf-disc/v1/nf-instances?target-nf-type=UDM&supi=[REDACTED]&gpsi=[REDACTED]");
+
+        foreach (var output in new[] { journal, exception.Message })
+        {
+            await Assert.That(output).DoesNotContain(Imsi);
+            await Assert.That(output).DoesNotContain(Msisdn.TrimStart('+'));
+        }
+    }
+
+    [Test]
+    public async Task DiagnosticsRedactCredentialsInRelativeUrlsNestedInParameters()
+    {
+        var nested = Uri.EscapeDataString($"/cb?access_token={AccessToken}&step=2");
+        var redactedNested = Uri.EscapeDataString("/cb?access_token=[REDACTED]&step=2");
+        var plainNested = Uri.EscapeDataString("/cb?step=2");
+
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/login?next={nested}&back={plainNested}");
+        request.Headers.TryAddWithoutValidation("X-Return-To", $"/done?next={nested}");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+        var exception = Assert.Throws<MockVerificationException>(() => client.Handler.VerifyNoUnmatchedRequests());
+
+        await Assert.That(journal).Contains($"/login?next={redactedNested}&back={plainNested}");
+        await Assert.That(journal).Contains($"X-Return-To: /done?next={redactedNested}");
+
+        foreach (var output in new[] { journal, exception.Message })
+        {
+            await Assert.That(output).DoesNotContain(AccessToken);
+        }
+    }
+}

@@ -15,6 +15,7 @@ public sealed class MockHttpHandler : HttpMessageHandler
     private readonly ConcurrentQueue<CapturedRequest> _requests = new();
     private HttpStatusCode _defaultStatusCode = HttpStatusCode.NotFound;
     private bool _throwOnUnmatched;
+    private int _diagnosticBodyLength;
 
     /// <summary>
     /// Creates a new <see cref="HttpClient"/> using this handler.
@@ -44,6 +45,25 @@ public sealed class MockHttpHandler : HttpMessageHandler
     public MockHttpHandler ThrowOnUnmatched()
     {
         _throwOnUnmatched = true;
+        return this;
+    }
+
+    /// <summary>
+    /// Include up to <paramref name="maxLength"/> characters of each request body in
+    /// <see cref="DescribeRequests"/> and verification failure messages. Bodies are
+    /// omitted by default because they often carry personal data. Even when enabled,
+    /// only JSON and form-encoded bodies are shown, with credential and subscriber-identifier
+    /// fields redacted; other bodies are still shown only as their length.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxLength"/> is negative.</exception>
+    public MockHttpHandler IncludeBodiesInDiagnostics(int maxLength = 2048)
+    {
+        if (maxLength < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxLength), maxLength, "Must be zero or greater.");
+        }
+
+        Volatile.Write(ref _diagnosticBodyLength, maxLength);
         return this;
     }
 
@@ -132,7 +152,7 @@ public sealed class MockHttpHandler : HttpMessageHandler
                 matcher.Describe(),
                 times,
                 matching,
-                Requests.Select(r => r.ToString()).ToList(),
+                Requests.Select(r => r.ToDiagnosticString(Volatile.Read(ref _diagnosticBodyLength))).ToList(),
                 null);
         }
     }
@@ -147,8 +167,27 @@ public sealed class MockHttpHandler : HttpMessageHandler
         {
             throw new MockVerificationException(
                 $"VerifyNoUnmatchedRequests failed. {unmatched.Count} request(s) did not match any setup:\n" +
-                string.Join("\n", unmatched.Select(r => $"  - {r}")));
+                string.Join("\n", unmatched.Select(r => $"  - {r}")) +
+                "\n\nRequest journal:\n" + DescribeRequests());
         }
+    }
+
+    /// <summary>
+    /// Returns a human-readable journal of every captured request, in the order
+    /// it was received. Credential-bearing headers are redacted, and bodies are
+    /// omitted unless <see cref="IncludeBodiesInDiagnostics"/> was called.
+    /// Useful when a test fails and you need to see what the code under test sent.
+    /// </summary>
+    public string DescribeRequests()
+    {
+        var requests = Requests;
+        if (requests.Count == 0)
+        {
+            return "(no requests captured)";
+        }
+
+        var maxBodyLength = Volatile.Read(ref _diagnosticBodyLength);
+        return string.Join("\n", requests.Select((r, i) => $"#{i + 1} {r.ToDiagnosticString(maxBodyLength)}"));
     }
 
     /// <summary>Clears all setups and captured requests.</summary>
@@ -204,7 +243,7 @@ public sealed class MockHttpHandler : HttpMessageHandler
         if (_throwOnUnmatched)
         {
             throw new HttpRequestException(
-                $"No matching setup for {request.Method} {request.RequestUri}. " +
+                $"No matching setup for {request.Method} {CapturedRequest.FormatUri(request.RequestUri)}. " +
                 $"Configure a setup using OnRequest() or use WithDefaultStatus() instead of ThrowOnUnmatched().");
         }
 

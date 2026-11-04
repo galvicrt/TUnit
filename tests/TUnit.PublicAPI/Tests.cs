@@ -27,6 +27,10 @@ public partial class Tests
     [Test]
     public Task OpenTelemetry_Library_Has_No_API_Changes()
         => VerifyPublicApi(typeof(TUnit.OpenTelemetry.TUnitOpenTelemetry).Assembly);
+
+    [Test]
+    public Task Mocks_Http_Library_Has_No_API_Changes()
+        => VerifyPublicApi(typeof(TUnit.Mocks.Http.MockHttpHandler).Assembly);
 #endif
 
     private async Task VerifyPublicApi(Assembly assembly)
