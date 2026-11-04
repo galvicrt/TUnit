@@ -68,6 +68,7 @@ public class RequestJournalTests
     [Arguments("Proxy-Authorization")]
     [Arguments("Cookie")]
     [Arguments("X-Api-Key")]
+    [Arguments("X-Auth")]
     [Arguments("X-Auth-Token")]
     [Arguments("X-Session-Id")]
     public async Task DescribeRequests_RedactsCredentialHeaders(string headerName)
@@ -96,6 +97,46 @@ public class RequestJournalTests
 
         await Assert.That(journal).Contains("Authorization: [REDACTED]");
         await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsCredentialQueryParameters()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+
+        await client.GetAsync($"{AmDataPath}?api_key={AccessToken}&supported-features=1a&access_token={AccessToken}#top");
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains(
+            $"GET http://localhost{AmDataPath}?api_key=[REDACTED]&supported-features=1a&access_token=[REDACTED]#top");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task VerifyNoUnmatchedRequests_UnmatchedListRedactsQueryCredentials()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+
+        await client.GetAsync($"{AmDataPath}?token={AccessToken}");
+
+        var exception = Assert.Throws<MockVerificationException>(() => client.Handler.VerifyNoUnmatchedRequests());
+
+        await Assert.That(exception.Message).Contains($"  - GET http://localhost{AmDataPath}?token=[REDACTED]");
+        await Assert.That(exception.Message).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task ThrowOnUnmatched_MessageRedactsQueryCredentials()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.ThrowOnUnmatched();
+
+        var exception = await Assert.ThrowsAsync<HttpRequestException>(
+            async () => await client.GetAsync($"{AmDataPath}?sig={AccessToken}"));
+
+        await Assert.That(exception!.Message).Contains("?sig=[REDACTED]");
+        await Assert.That(exception.Message).DoesNotContain(AccessToken);
     }
 
     [Test]

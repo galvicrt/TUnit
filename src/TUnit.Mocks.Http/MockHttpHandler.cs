@@ -242,7 +242,7 @@ public sealed class MockHttpHandler : HttpMessageHandler
         if (_throwOnUnmatched)
         {
             throw new HttpRequestException(
-                $"No matching setup for {request.Method} {request.RequestUri}. " +
+                $"No matching setup for {request.Method} {CapturedRequest.FormatUri(request.RequestUri)}. " +
                 $"Configure a setup using OnRequest() or use WithDefaultStatus() instead of ThrowOnUnmatched().");
         }
 

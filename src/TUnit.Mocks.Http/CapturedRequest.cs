@@ -59,8 +59,9 @@ public sealed class CapturedRequest
         "Set-Cookie",
     };
 
-    private static readonly string[] SensitiveHeaderNameFragments =
+    private static readonly string[] SensitiveNameFragments =
     [
+        "auth",
         "token",
         "secret",
         "api-key",
@@ -68,14 +69,17 @@ public sealed class CapturedRequest
         "password",
         "session",
         "signature",
+        "sig",
+        "key",
+        "code",
     ];
 
     /// <summary>
     /// Returns a multi-line description of the request for test failure diagnostics:
     /// the UTC timestamp (ISO 8601), method, URI, match status and headers.
-    /// Values of credential-bearing headers (for example <c>Authorization</c>,
-    /// <c>Cookie</c> or any header whose name contains <c>token</c> or <c>api-key</c>)
-    /// are replaced with <c>[REDACTED]</c>.
+    /// Values of credential-bearing headers and query parameters (for example
+    /// <c>Authorization</c>, <c>Cookie</c>, or any name containing <c>auth</c>,
+    /// <c>token</c> or <c>key</c>) are replaced with <c>[REDACTED]</c>.
     /// </summary>
     /// <param name="maxBodyLength">
     /// Maximum number of body characters to include. The default, <c>0</c>, omits the
@@ -94,7 +98,7 @@ public sealed class CapturedRequest
         builder.Append('[')
             .Append(Timestamp.UtcDateTime.ToString("O", CultureInfo.InvariantCulture))
             .Append("] ");
-        builder.Append(Method).Append(' ').Append(RequestUri);
+        builder.Append(Method).Append(' ').Append(FormatUri(RequestUri));
         builder.Append(Matched ? " (matched)" : " (UNMATCHED)");
 
         foreach (var header in Headers)
@@ -103,7 +107,7 @@ public sealed class CapturedRequest
                 .Append("    ")
                 .Append(header.Key)
                 .Append(": ")
-                .Append(IsSensitiveHeader(header.Key) ? Redacted : string.Join(", ", header.Value));
+                .Append(IsSensitiveName(header.Key) ? Redacted : string.Join(", ", header.Value));
         }
 
         if (!string.IsNullOrEmpty(Body))
@@ -127,14 +131,14 @@ public sealed class CapturedRequest
         return builder.ToString();
     }
 
-    private static bool IsSensitiveHeader(string name)
+    private static bool IsSensitiveName(string name)
     {
         if (SensitiveHeaderNames.Contains(name))
         {
             return true;
         }
 
-        foreach (var fragment in SensitiveHeaderNameFragments)
+        foreach (var fragment in SensitiveNameFragments)
         {
             if (name.Contains(fragment, StringComparison.OrdinalIgnoreCase))
             {
@@ -145,7 +149,40 @@ public sealed class CapturedRequest
         return false;
     }
 
-    /// <inheritdoc />
+    /// <summary>
+    /// Formats a request URI for diagnostics, replacing the values of query parameters
+    /// whose names look credential-bearing (for example <c>api_key</c>, <c>token</c>,
+    /// <c>sig</c> or <c>code</c>) with <c>[REDACTED]</c>.
+    /// </summary>
+    internal static string FormatUri(Uri? uri)
+    {
+        if (uri is null)
+        {
+            return string.Empty;
+        }
+
+        if (!uri.IsAbsoluteUri || string.IsNullOrEmpty(uri.Query))
+        {
+            return uri.ToString();
+        }
+
+        var parameters = uri.Query.Substring(1).Split('&');
+        for (var i = 0; i < parameters.Length; i++)
+        {
+            var separator = parameters[i].IndexOf('=');
+            var name = separator < 0 ? parameters[i] : parameters[i].Substring(0, separator);
+            if (separator >= 0 && IsSensitiveName(Uri.UnescapeDataString(name)))
+            {
+                parameters[i] = name + "=" + Redacted;
+            }
+        }
+
+        return uri.GetLeftPart(UriPartial.Path) + "?" + string.Join("&", parameters) + uri.Fragment;
+    }
+
+    /// <summary>
+    /// Returns the method and URI. Credential-bearing query parameter values are redacted.
+    /// </summary>
     public override string ToString()
-        => $"{Method} {RequestUri}";
+        => $"{Method} {FormatUri(RequestUri)}";
 }
