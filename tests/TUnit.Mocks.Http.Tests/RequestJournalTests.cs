@@ -269,9 +269,63 @@ public class RequestJournalTests
         using var client = Mock.HttpClient("http://localhost");
         client.Handler.IncludeBodiesInDiagnostics();
 
-        await client.PostAsync(AmDataPath, new StringContent($$"""{"msisdn":"{{Msisdn}}"}"""));
+        var body = $$"""{"supi":"imsi-{{Imsi}}","plmnId":{"mcc":"001","mnc":"01"},"msisdn":"{{Msisdn}}","password":"{{AccessToken}}","ratTypes":["NR",1,true,null]}""";
+        await client.PostAsync(AmDataPath, new StringContent(body, Encoding.UTF8, "application/json"));
 
-        await Assert.That(client.Handler.DescribeRequests()).Contains($"Body: {{\"msisdn\":\"{Msisdn}\"}}");
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains(
+            """Body: {"supi":"[REDACTED]","plmnId":{"mcc":"001","mnc":"01"},"msisdn":"[REDACTED]","password":"[REDACTED]","ratTypes":["NR",1,true,null]}""");
+        await Assert.That(journal).DoesNotContain(Msisdn);
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsNestedSensitiveValuesWhole()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.IncludeBodiesInDiagnostics();
+
+        var body = $$"""{"gpsi":["msisdn-{{Msisdn}}"],"auth":{"key":"{{AccessToken}}"},"step":2}""";
+        await client.PostAsync(AmDataPath, new StringContent(body, Encoding.UTF8, "application/problem+json"));
+
+        await Assert.That(client.Handler.DescribeRequests())
+            .Contains("""Body: {"gpsi":"[REDACTED]","auth":"[REDACTED]","step":2}""");
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsFormEncodedBodies()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.IncludeBodiesInDiagnostics();
+
+        await client.PostAsync(AmDataPath, new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["grant_type"] = "client_credentials",
+            ["client_secret"] = AccessToken,
+            ["msisdn"] = Msisdn,
+        }));
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Body: grant_type=client_credentials&client_secret=[REDACTED]&msisdn=[REDACTED]");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    [Arguments("text/plain", "msisdn=+12065550123")]
+    [Arguments("application/json", "{\"msisdn\": ")]
+    public async Task DescribeRequests_OmitsBodiesThatCannotBeRedacted(string mediaType, string body)
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.IncludeBodiesInDiagnostics();
+
+        await client.PostAsync(AmDataPath, new StringContent(body, Encoding.UTF8, mediaType));
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains($"Body: <{body.Length} chars omitted>");
+        await Assert.That(journal).DoesNotContain(Msisdn);
     }
 
     [Test]
@@ -280,12 +334,13 @@ public class RequestJournalTests
         using var client = Mock.HttpClient("http://localhost");
         client.Handler.IncludeBodiesInDiagnostics(maxLength: 16);
 
-        await client.PostAsync("/cdr/batch", new StringContent(new string('x', 100)));
+        var body = $$"""{"note":"{{new string('x', 100)}}"}""";
+        await client.PostAsync("/cdr/batch", new StringContent(body, Encoding.UTF8, "application/json"));
 
         var journal = client.Handler.DescribeRequests();
 
-        await Assert.That(journal).Contains("Body: " + new string('x', 16) + "...");
-        await Assert.That(journal).DoesNotContain(new string('x', 17));
+        await Assert.That(journal).Contains("Body: {\"note\":\"" + new string('x', 7) + "...");
+        await Assert.That(journal).DoesNotContain(new string('x', 8));
     }
 
     [Test]

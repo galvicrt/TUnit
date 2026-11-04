@@ -51,8 +51,9 @@ public sealed class MockHttpHandler : HttpMessageHandler
     /// <summary>
     /// Include up to <paramref name="maxLength"/> characters of each request body in
     /// <see cref="DescribeRequests"/> and verification failure messages. Bodies are
-    /// omitted by default because they often carry personal data; enable this only
-    /// for tests that use synthetic data.
+    /// omitted by default because they often carry personal data. Even when enabled,
+    /// only JSON and form-encoded bodies are shown, with credential and subscriber-identifier
+    /// fields redacted; other bodies are still shown only as their length.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxLength"/> is negative.</exception>
     public MockHttpHandler IncludeBodiesInDiagnostics(int maxLength = 2048)

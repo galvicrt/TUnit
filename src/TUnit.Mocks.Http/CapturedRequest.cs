@@ -1,5 +1,8 @@
 using System.Globalization;
+using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 
 namespace TUnit.Mocks.Http;
 
@@ -59,6 +62,27 @@ public sealed class CapturedRequest
         "Set-Cookie",
     };
 
+    /// <summary>
+    /// Body field names that hold subscriber or device identifiers (3GPP and common
+    /// telecom names), matched exactly and case-insensitively.
+    /// </summary>
+    private static readonly HashSet<string> SubscriberIdentifierNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "imsi",
+        "supi",
+        "suci",
+        "msisdn",
+        "gpsi",
+        "imei",
+        "imeisv",
+        "pei",
+        "iccid",
+        "msin",
+        "email",
+        "phoneNumber",
+        "phone",
+    };
+
     private static readonly string[] SensitiveNameFragments =
     [
         "auth",
@@ -85,7 +109,11 @@ public sealed class CapturedRequest
     /// <param name="maxBodyLength">
     /// Maximum number of body characters to include. The default, <c>0</c>, omits the
     /// body and shows only its length, because bodies often carry personal data.
-    /// Longer bodies are truncated.
+    /// When positive, JSON and form-encoded bodies are shown with credential and
+    /// subscriber-identifier fields (for example <c>password</c>, <c>imsi</c> or
+    /// <c>msisdn</c>) replaced with <c>[REDACTED]</c>; bodies of any other content type,
+    /// or that cannot be parsed, are still shown only as their length. The redacted
+    /// body is truncated to this length.
     /// </param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxBodyLength"/> is negative.</exception>
     public string ToDiagnosticString(int maxBodyLength = 0)
@@ -115,22 +143,113 @@ public sealed class CapturedRequest
         {
             builder.Append('\n').Append("    Body: ");
 
-            if (maxBodyLength == 0)
+            var body = maxBodyLength == 0 ? null : RedactBody(Body, GetContentType());
+
+            if (body is null)
             {
                 builder.Append('<').Append(Body.Length.ToString(CultureInfo.InvariantCulture)).Append(" chars omitted>");
             }
-            else if (Body.Length > maxBodyLength)
+            else if (body.Length > maxBodyLength)
             {
-                builder.Append(Body, 0, maxBodyLength).Append("...");
+                builder.Append(body, 0, maxBodyLength).Append("...");
             }
             else
             {
-                builder.Append(Body);
+                builder.Append(body);
             }
         }
 
         return builder.ToString();
     }
+
+    private string? GetContentType()
+        => Headers.TryGetValue("Content-Type", out var values)
+            && MediaTypeHeaderValue.TryParse(values.FirstOrDefault(), out var mediaType)
+                ? mediaType.MediaType
+                : null;
+
+    /// <summary>
+    /// Returns the body with sensitive field values replaced by <c>[REDACTED]</c>, or
+    /// <see langword="null"/> when the body cannot be redacted safely (an unknown content
+    /// type or malformed content), in which case only its length is shown.
+    /// </summary>
+    private static string? RedactBody(string body, string? mediaType)
+    {
+        if (mediaType is null)
+        {
+            return null;
+        }
+
+        if (mediaType.Equals("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase))
+        {
+            return RedactParameters(body, IsSensitiveBodyField);
+        }
+
+        if (mediaType.EndsWith("/json", StringComparison.OrdinalIgnoreCase)
+            || mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase))
+        {
+            return RedactJson(body);
+        }
+
+        return null;
+    }
+
+    private static string? RedactJson(string body)
+    {
+        try
+        {
+            var reader = new Utf8JsonReader(
+                Encoding.UTF8.GetBytes(body),
+                new JsonReaderOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
+            {
+                var redactValue = false;
+                while (reader.Read())
+                {
+                    if (reader.TokenType == JsonTokenType.PropertyName)
+                    {
+                        var name = reader.GetString()!;
+                        writer.WritePropertyName(name);
+                        redactValue = IsSensitiveBodyField(name);
+                        continue;
+                    }
+
+                    if (redactValue && reader.TokenType is not (JsonTokenType.EndObject or JsonTokenType.EndArray))
+                    {
+                        // Skip moves past a whole object or array value; for a scalar it is a no-op.
+                        reader.Skip();
+                        writer.WriteStringValue(Redacted);
+                        redactValue = false;
+                        continue;
+                    }
+
+                    switch (reader.TokenType)
+                    {
+                        case JsonTokenType.StartObject: writer.WriteStartObject(); break;
+                        case JsonTokenType.EndObject: writer.WriteEndObject(); break;
+                        case JsonTokenType.StartArray: writer.WriteStartArray(); break;
+                        case JsonTokenType.EndArray: writer.WriteEndArray(); break;
+                        case JsonTokenType.String: writer.WriteStringValue(reader.GetString()); break;
+                        case JsonTokenType.Number: writer.WriteRawValue(reader.ValueSpan, skipInputValidation: true); break;
+                        case JsonTokenType.True: writer.WriteBooleanValue(true); break;
+                        case JsonTokenType.False: writer.WriteBooleanValue(false); break;
+                        case JsonTokenType.Null: writer.WriteNullValue(); break;
+                    }
+                }
+            }
+
+            return Encoding.UTF8.GetString(stream.GetBuffer(), 0, (int)stream.Length);
+        }
+        catch (Exception e) when (e is JsonException or InvalidOperationException)
+        {
+            return null;
+        }
+    }
+
+    private static bool IsSensitiveBodyField(string name)
+        => IsSensitiveName(name) || SubscriberIdentifierNames.Contains(name);
 
     private static bool IsSensitiveName(string name)
     {
@@ -260,6 +379,9 @@ public sealed class CapturedRequest
     }
 
     private static string RedactParameters(string parameters)
+        => RedactParameters(parameters, IsSensitiveName);
+
+    private static string RedactParameters(string parameters, Func<string, bool> isSensitive)
     {
         var parts = parameters.Split('&');
         for (var i = 0; i < parts.Length; i++)
@@ -271,7 +393,7 @@ public sealed class CapturedRequest
             }
 
             var name = parts[i].Substring(0, separator);
-            if (IsSensitiveName(Uri.UnescapeDataString(name)))
+            if (isSensitive(Uri.UnescapeDataString(name.Replace('+', ' '))))
             {
                 parts[i] = name + "=" + Redacted;
             }
