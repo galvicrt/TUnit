@@ -59,14 +59,6 @@ public sealed class CapturedRequest
         "Set-Cookie",
     };
 
-    private static readonly HashSet<string> UriValuedHeaderNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "Referer",
-        "Origin",
-        "Location",
-        "Content-Location",
-    };
-
     private static readonly string[] SensitiveNameFragments =
     [
         "auth",
@@ -207,13 +199,15 @@ public sealed class CapturedRequest
             return Redacted;
         }
 
-        if (UriValuedHeaderNames.Contains(name))
-        {
-            return string.Join(", ", values.Select(FormatUriString));
-        }
-
-        return string.Join(", ", values);
+        // Any header can carry a URL (Referer, Location, or custom ones such as
+        // X-Callback-Url), so redact URI credentials based on the value, not the name.
+        return string.Join(", ", values.Select(value => LooksLikeUri(value) ? FormatUriString(value) : value));
     }
+
+    private static bool LooksLikeUri(string value)
+        => value.Contains("://", StringComparison.Ordinal)
+            || value.IndexOf('?') >= 0
+            || value.IndexOf('#') >= 0;
 
     private static string FormatUriString(string value)
         => Uri.TryCreate(value, UriKind.Absolute, out var uri) && !uri.IsFile

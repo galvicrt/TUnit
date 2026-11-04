@@ -159,6 +159,39 @@ public class RequestJournalTests
     }
 
     [Test]
+    public async Task DescribeRequests_RedactsCredentialsInsideUnlistedUrlValuedHeaders()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation("X-Callback-Url", $"https://portal.test/callback?access_token={AccessToken}&step=2");
+        request.Headers.TryAddWithoutValidation("X-Return-To", $"/done?code={AccessToken}");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("X-Callback-Url: https://portal.test/callback?access_token=[REDACTED]&step=2");
+        await Assert.That(journal).Contains("X-Return-To: /done?code=[REDACTED]");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_LeavesNonUriHeaderValuesUnchanged()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation("X-Correlation-Id", "corr-42");
+        request.Headers.TryAddWithoutValidation("X-Client", "udm-client/1.0 (synthetic; build=7)");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("X-Correlation-Id: corr-42");
+        await Assert.That(journal).Contains("X-Client: udm-client/1.0 (synthetic; build=7)");
+    }
+
+    [Test]
     public async Task DescribeRequests_RedactsCredentialsInRelativeRequestUri()
     {
         // Invoke the handler directly so the request URI is never resolved against a base address.
