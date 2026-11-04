@@ -387,4 +387,31 @@ public class RequestJournalTests
         await Assert.That(exception.Message).DoesNotContain(AccessToken);
         await Assert.That(exception.Message).DoesNotContain("amf-test-01");
     }
+
+    [Test]
+    public async Task DiagnosticsRedactCredentialsInUrlsNestedInQueryParameters()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation(
+            "X-Return-To",
+            "/done?next=" + Uri.EscapeDataString($"https://provisioner:{AccessToken}@portal.test/home")
+                + "&then=" + Uri.EscapeDataString($"https://portal.test/cb?access_token={AccessToken}")
+                + "&home=" + Uri.EscapeDataString("https://portal.test/home"));
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+        var exception = Assert.Throws<MockVerificationException>(() => client.Handler.VerifyNoUnmatchedRequests());
+
+        await Assert.That(journal).Contains("next=" + Uri.EscapeDataString("https://[REDACTED]@portal.test/home"));
+        await Assert.That(journal).Contains("then=" + Uri.EscapeDataString("https://portal.test/cb?access_token=[REDACTED]"));
+        await Assert.That(journal).Contains("home=" + Uri.EscapeDataString("https://portal.test/home"));
+
+        foreach (var output in new[] { journal, exception.Message })
+        {
+            await Assert.That(output).DoesNotContain(AccessToken);
+            await Assert.That(output).DoesNotContain("provisioner");
+        }
+    }
 }

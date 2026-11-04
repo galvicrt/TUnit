@@ -396,6 +396,19 @@ public sealed class CapturedRequest
             if (isSensitive(Uri.UnescapeDataString(name.Replace('+', ' '))))
             {
                 parts[i] = name + "=" + Redacted;
+                continue;
+            }
+
+            // A non-sensitive parameter can still carry a URL with credentials, for example
+            // next=https%3A%2F%2Fuser%3Apassword%40portal.test. Redact that URL recursively.
+            var value = Uri.UnescapeDataString(parts[i].Substring(separator + 1));
+            if (value.Contains("://", StringComparison.Ordinal) || value.StartsWith("//", StringComparison.Ordinal))
+            {
+                var redacted = FormatUriString(value);
+                if (!string.Equals(redacted, value, StringComparison.Ordinal))
+                {
+                    parts[i] = name + "=" + Uri.EscapeDataString(redacted);
+                }
             }
         }
 
