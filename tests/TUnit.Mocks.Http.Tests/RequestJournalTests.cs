@@ -10,12 +10,15 @@ namespace TUnit.Mocks.Http.Tests;
 /// <summary>
 /// Tests for the request journal (<see cref="MockHttpHandler.DescribeRequests"/>),
 /// using a subscriber-profile lookup against a 5G UDM-style API as the scenario.
+/// All subscriber data is synthetic: the IMSI is in the 001-01 test network and the
+/// MSISDN is in the 555-0100 to 555-0199 range reserved for fictional use.
 /// </summary>
 public class RequestJournalTests
 {
-    private const string Imsi = "310260987654321";
-    private const string Msisdn = "+12065551234";
-    private const string AccessToken = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJic3MtcHJvdmlzaW9uaW5nIn0.k3Yf9QeZp2mXrT8vLwN4";
+    private const string Imsi = "001010000000001";
+    private const string Msisdn = "+12065550123";
+    private const string AccessToken = "test-token-not-a-real-credential";
+    private const string AmDataPath = $"/nudm-sdm/v2/imsi-{Imsi}/am-data";
 
     [Test]
     public async Task DescribeRequests_WhenNoRequests_SaysSo()
@@ -26,53 +29,105 @@ public class RequestJournalTests
     }
 
     [Test]
-    public async Task DescribeRequests_IncludesMethodPathHeadersAndBody()
+    public async Task DescribeRequests_IncludesMethodUriStatusAndHeaders()
     {
-        using var client = Mock.HttpClient("http://udm.core.local:8080");
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AccessToken);
+        using var client = Mock.HttpClient("http://localhost");
+        client.DefaultRequestHeaders.Add("X-Correlation-Id", "corr-42");
         client.Handler
-            .OnRequest(r => r.Method(HttpMethod.Patch).Path($"/nudm-sdm/v2/imsi-{Imsi}/am-data"))
+            .OnRequest(r => r.Method(HttpMethod.Patch).Path(AmDataPath))
             .Respond(HttpStatusCode.NoContent);
 
-        var patch = """{"msisdn":"+12065551234","subscribedUeAmbr":{"uplink":"100 Mbps","downlink":"1 Gbps"}}""";
-        await client.SendAsync(new HttpRequestMessage(HttpMethod.Patch, $"/nudm-sdm/v2/imsi-{Imsi}/am-data")
+        await client.SendAsync(new HttpRequestMessage(HttpMethod.Patch, AmDataPath)
         {
-            Content = new StringContent(patch, Encoding.UTF8, "application/merge-patch+json")
+            Content = new StringContent("{}", Encoding.UTF8, "application/merge-patch+json")
         });
 
         var journal = client.Handler.DescribeRequests();
 
-        await Assert.That(journal).Contains("#1 [");
-        await Assert.That(journal).Contains($"PATCH http://udm.core.local:8080/nudm-sdm/v2/imsi-{Imsi}/am-data (matched)");
-        await Assert.That(journal).Contains($"Authorization: Bearer {AccessToken}");
+        await Assert.That(journal).StartsWith("#1 [");
+        await Assert.That(journal).Contains($"PATCH http://localhost{AmDataPath} (matched)");
+        await Assert.That(journal).Contains("X-Correlation-Id: corr-42");
         await Assert.That(journal).Contains("Content-Type: application/merge-patch+json; charset=utf-8");
-        await Assert.That(journal).Contains(Msisdn);
     }
 
     [Test]
-    public async Task DescribeRequests_MarksUnmatchedRequests()
+    public async Task DescribeRequests_UsesInvariantUtcTimestamp()
     {
-        using var client = Mock.HttpClient("http://udm.core.local:8080");
-        client.Handler.OnGet($"/nudm-sdm/v2/imsi-{Imsi}/am-data").RespondWithJson("{}");
+        using var client = Mock.HttpClient("http://localhost");
 
-        await client.GetAsync($"/nudm-sdm/v2/imsi-{Imsi}/am-data");
-        await client.GetAsync($"/nudm-sdm/v2/imsi-{Imsi}/sms-data");
+        await client.GetAsync(AmDataPath);
+
+        var request = client.Handler.Requests[0];
+        var expected = request.Timestamp.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
+
+        await Assert.That(client.Handler.DescribeRequests()).StartsWith($"#1 [{expected}] ");
+    }
+
+    [Test]
+    [Arguments("Authorization")]
+    [Arguments("Proxy-Authorization")]
+    [Arguments("Cookie")]
+    [Arguments("X-Api-Key")]
+    [Arguments("X-Auth-Token")]
+    [Arguments("X-Session-Id")]
+    public async Task DescribeRequests_RedactsCredentialHeaders(string headerName)
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation(headerName, AccessToken);
+
+        await client.SendAsync(request);
 
         var journal = client.Handler.DescribeRequests();
 
-        await Assert.That(journal).Contains("#1 [");
-        await Assert.That(journal).Contains("am-data (matched)");
-        await Assert.That(journal).Contains("#2 [");
-        await Assert.That(journal).Contains("sms-data (UNMATCHED)");
+        await Assert.That(journal).Contains($"{headerName}: [REDACTED]");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsBearerToken()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AccessToken);
+
+        await client.GetAsync(AmDataPath);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Authorization: [REDACTED]");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_OmitsBodiesByDefault()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        var body = $$"""{"msisdn":"{{Msisdn}}"}""";
+
+        await client.PostAsync(AmDataPath, new StringContent(body));
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains($"Body: <{body.Length} chars omitted>");
+        await Assert.That(journal).DoesNotContain(Msisdn);
+    }
+
+    [Test]
+    public async Task DescribeRequests_IncludesBodiesWhenEnabled()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.IncludeBodiesInDiagnostics();
+
+        await client.PostAsync(AmDataPath, new StringContent($$"""{"msisdn":"{{Msisdn}}"}"""));
+
+        await Assert.That(client.Handler.DescribeRequests()).Contains($"Body: {{\"msisdn\":\"{Msisdn}\"}}");
     }
 
     [Test]
     public async Task DescribeRequests_TruncatesLongBodies()
     {
-        CapturedRequest.MaxDiagnosticBodyLength = 16;
-
         using var client = Mock.HttpClient("http://localhost");
-        client.Handler.OnAnyRequest().Respond();
+        client.Handler.IncludeBodiesInDiagnostics(maxLength: 16);
 
         await client.PostAsync("/cdr/batch", new StringContent(new string('x', 100)));
 
@@ -83,18 +138,47 @@ public class RequestJournalTests
     }
 
     [Test]
+    public async Task IncludeBodiesInDiagnostics_RejectsNegativeLength()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => client.Handler.IncludeBodiesInDiagnostics(-1));
+
+        await Assert.That(client.Handler.Requests).IsEmpty();
+    }
+
+    [Test]
+    public async Task DescribeRequests_MarksUnmatchedRequests()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        client.Handler.OnGet(AmDataPath).RespondWithJson("{}");
+
+        await client.GetAsync(AmDataPath);
+        await client.GetAsync($"/nudm-sdm/v2/imsi-{Imsi}/sms-data");
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("am-data (matched)");
+        await Assert.That(journal).Contains("\n#2 [");
+        await Assert.That(journal).Contains("sms-data (UNMATCHED)");
+    }
+
+    [Test]
     public async Task VerifyNoUnmatchedRequests_FailureMessageIncludesJournal()
     {
-        using var client = Mock.HttpClient("http://udm.core.local:8080");
+        using var client = Mock.HttpClient("http://localhost");
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", AccessToken);
 
         await client.PostAsync(
             $"/nudm-uecm/v1/imsi-{Imsi}/registrations/amf-3gpp-access",
-            new StringContent("""{"amfInstanceId":"amf-west-01"}""", Encoding.UTF8, "application/json"));
+            new StringContent("""{"amfInstanceId":"amf-test-01"}""", Encoding.UTF8, "application/json"));
 
         var exception = Assert.Throws<MockVerificationException>(() => client.Handler.VerifyNoUnmatchedRequests());
 
         await Assert.That(exception.Message).Contains("Request journal:");
         await Assert.That(exception.Message).Contains("amf-3gpp-access (UNMATCHED)");
-        await Assert.That(exception.Message).Contains("amf-west-01");
+        await Assert.That(exception.Message).Contains("Authorization: [REDACTED]");
+        await Assert.That(exception.Message).DoesNotContain(AccessToken);
+        await Assert.That(exception.Message).DoesNotContain("amf-test-01");
     }
 }
