@@ -414,4 +414,48 @@ public class RequestJournalTests
             await Assert.That(output).DoesNotContain("provisioner");
         }
     }
+
+    [Test]
+    public async Task DiagnosticsRedactSubscriberIdentifierQueryParameters()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+
+        await client.GetAsync($"/nnrf-disc/v1/nf-instances?target-nf-type=UDM&supi=imsi-{Imsi}&gpsi=msisdn-{Msisdn.TrimStart('+')}");
+
+        var journal = client.Handler.DescribeRequests();
+        var exception = Assert.Throws<MockVerificationException>(() => client.Handler.VerifyNoUnmatchedRequests());
+
+        await Assert.That(journal).Contains("/nnrf-disc/v1/nf-instances?target-nf-type=UDM&supi=[REDACTED]&gpsi=[REDACTED]");
+
+        foreach (var output in new[] { journal, exception.Message })
+        {
+            await Assert.That(output).DoesNotContain(Imsi);
+            await Assert.That(output).DoesNotContain(Msisdn.TrimStart('+'));
+        }
+    }
+
+    [Test]
+    public async Task DiagnosticsRedactCredentialsInRelativeUrlsNestedInParameters()
+    {
+        var nested = Uri.EscapeDataString($"/cb?access_token={AccessToken}&step=2");
+        var redactedNested = Uri.EscapeDataString("/cb?access_token=[REDACTED]&step=2");
+        var plainNested = Uri.EscapeDataString("/cb?step=2");
+
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"/login?next={nested}&back={plainNested}");
+        request.Headers.TryAddWithoutValidation("X-Return-To", $"/done?next={nested}");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+        var exception = Assert.Throws<MockVerificationException>(() => client.Handler.VerifyNoUnmatchedRequests());
+
+        await Assert.That(journal).Contains($"/login?next={redactedNested}&back={plainNested}");
+        await Assert.That(journal).Contains($"X-Return-To: /done?next={redactedNested}");
+
+        foreach (var output in new[] { journal, exception.Message })
+        {
+            await Assert.That(output).DoesNotContain(AccessToken);
+        }
+    }
 }

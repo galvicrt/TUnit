@@ -103,8 +103,10 @@ public sealed class CapturedRequest
     /// the UTC timestamp (ISO 8601), method, URI, match status and headers.
     /// Values of credential-bearing headers and URI parameters (for example
     /// <c>Authorization</c>, <c>Cookie</c>, or any name containing <c>auth</c>,
-    /// <c>token</c> or <c>key</c>) and URI user information are replaced with
-    /// <c>[REDACTED]</c>, including inside URI-valued headers such as <c>Referer</c>.
+    /// <c>token</c> or <c>key</c>), URI parameters that are subscriber identifiers
+    /// (for example <c>supi</c>, <c>gpsi</c> or <c>msisdn</c>) and URI user information
+    /// are replaced with <c>[REDACTED]</c>, including inside URI-valued headers such as
+    /// <c>Referer</c> and URLs nested in parameter values.
     /// </summary>
     /// <param name="maxBodyLength">
     /// Maximum number of body characters to include. The default, <c>0</c>, omits the
@@ -182,7 +184,7 @@ public sealed class CapturedRequest
 
         if (mediaType.Equals("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase))
         {
-            return RedactParameters(body, IsSensitiveBodyField);
+            return RedactParameters(body);
         }
 
         if (mediaType.EndsWith("/json", StringComparison.OrdinalIgnoreCase)
@@ -273,7 +275,8 @@ public sealed class CapturedRequest
     /// Formats a request URI for diagnostics. User information (<c>user:password@</c>)
     /// is replaced with <c>[REDACTED]</c>, as are the values of query and fragment
     /// parameters whose names look credential-bearing (for example <c>api_key</c>,
-    /// <c>access_token</c>, <c>sig</c> or <c>code</c>).
+    /// <c>access_token</c>, <c>sig</c> or <c>code</c>) or are subscriber identifiers
+    /// (for example <c>supi</c>, <c>gpsi</c>, <c>imsi</c> or <c>msisdn</c>).
     /// </summary>
     internal static string FormatUri(Uri? uri)
     {
@@ -378,10 +381,12 @@ public sealed class CapturedRequest
             : "//" + Redacted + value.Substring(userInfoEnd);
     }
 
+    /// <summary>
+    /// Redacts <c>name=value</c> parameters (URI query, URI fragment or form body) whose
+    /// names are credential-bearing or subscriber identifiers, and credentials inside
+    /// URL values of other parameters.
+    /// </summary>
     private static string RedactParameters(string parameters)
-        => RedactParameters(parameters, IsSensitiveName);
-
-    private static string RedactParameters(string parameters, Func<string, bool> isSensitive)
     {
         var parts = parameters.Split('&');
         for (var i = 0; i < parts.Length; i++)
@@ -393,16 +398,18 @@ public sealed class CapturedRequest
             }
 
             var name = parts[i].Substring(0, separator);
-            if (isSensitive(Uri.UnescapeDataString(name.Replace('+', ' '))))
+            if (IsSensitiveBodyField(Uri.UnescapeDataString(name.Replace('+', ' '))))
             {
                 parts[i] = name + "=" + Redacted;
                 continue;
             }
 
-            // A non-sensitive parameter can still carry a URL with credentials, for example
-            // next=https%3A%2F%2Fuser%3Apassword%40portal.test. Redact that URL recursively.
+            // A non-sensitive parameter can still carry a URL with credentials, absolute or
+            // relative, for example next=https%3A%2F%2Fuser%3Apassword%40portal.test or
+            // next=%2Fcb%3Faccess_token%3D... Redact that URL recursively; each step works
+            // on a shorter substring, so the recursion ends.
             var value = Uri.UnescapeDataString(parts[i].Substring(separator + 1));
-            if (value.Contains("://", StringComparison.Ordinal) || value.StartsWith("//", StringComparison.Ordinal))
+            if (LooksLikeUri(value))
             {
                 var redacted = FormatUriString(value);
                 if (!string.Equals(redacted, value, StringComparison.Ordinal))
