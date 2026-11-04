@@ -1,0 +1,103 @@
+[assembly: .(".NETCoreApp,Version=v10.0", FrameworkDisplayName=".NET 10.0")]
+namespace .Http
+{
+    public sealed class CapturedRequest
+    {
+        public string? Body { get; }
+        public .<string, .<string>> Headers { get; }
+        public bool Matched { get; }
+        public . Method { get; }
+        public ? RequestUri { get; }
+        public  Timestamp { get; }
+        public string ToDiagnosticString(int maxBodyLength = 0) { }
+        public override string ToString() { }
+    }
+    public class MockHttpClient : .
+    {
+        public MockHttpClient() { }
+        public MockHttpClient(. handler) { }
+        public MockHttpClient(string baseAddress) { }
+        public . Handler { get; }
+    }
+    public sealed class MockHttpClientFactory : , .
+    {
+        public MockHttpClientFactory() { }
+        public MockHttpClientFactory(. handler) { }
+        public . Handler { get; }
+        public . CreateClient(string name) { }
+        public void Dispose() { }
+        public . HandlerFor(string name) { }
+        public . WithBaseAddress(string baseAddress) { }
+        public . WithBaseAddress(string name, string baseAddress) { }
+        public . WithHandler(string name, . handler) { }
+    }
+    public sealed class MockHttpHandler : .
+    {
+        public MockHttpHandler() { }
+        public .<.> Requests { get; }
+        public .<.> UnmatchedRequests { get; }
+        public . CreateClient() { }
+        public . CreateClient(string baseAddress) { }
+        public string DescribeRequests() { }
+        public . IncludeBodiesInDiagnostics(int maxLength = 2048) { }
+        public . OnAnyRequest() { }
+        public . OnDelete(string path) { }
+        public . OnGet(string path) { }
+        public . OnPost(string path) { }
+        public . OnPut(string path) { }
+        public . OnRequest(<.> configure) { }
+        public void Reset() { }
+        protected override .<.> SendAsync(. request, .CancellationToken cancellationToken) { }
+        public . ThrowOnUnmatched() { }
+        public void Verify(<.> configure, .Times times) { }
+        public void VerifyNoUnmatchedRequests() { }
+        public . WithDefaultStatus(.HttpStatusCode statusCode) { }
+    }
+    public sealed class RequestMatcher
+    {
+        public RequestMatcher() { }
+        public . BodyContains(string text) { }
+        public . HasHeader(string name) { }
+        public . Header(string name, string value) { }
+        public . Matching(<., bool> predicate) { }
+        public . Method(. method) { }
+        public . Path(string path) { }
+        public . PathMatches(string pattern) { }
+        public . PathStartsWith(string prefix) { }
+    }
+    public sealed class RequestSetup
+    {
+        public . Respond(.HttpStatusCode statusCode = 200) { }
+        public . RespondWith(<., .> factory) { }
+        public . RespondWith(. response) { }
+        public . RespondWithJson(string json, .HttpStatusCode statusCode = 200) { }
+        public . RespondWithString(string content, .HttpStatusCode statusCode = 200) { }
+        public . Then() { }
+        public void Throws( exception) { }
+        public void Throws(string message) { }
+    }
+    public sealed class ResponseBuilder
+    {
+        public ResponseBuilder() { }
+        public . WithDelay( delay) { }
+        public . WithFactory(<., .> factory) { }
+        public . WithHeader(string name, string value) { }
+        public . WithJsonContent(string json) { }
+        public . WithStatus(.HttpStatusCode statusCode) { }
+        public . WithStringContent(string content, string mediaType = "text/plain") { }
+    }
+}
+namespace 
+{
+    public static class MockExtensions
+    {
+        extension(.Mock)
+        {
+            public static . HttpHandler() { }
+            public static . HttpClient() { }
+            public static . HttpClient(string baseAddress) { }
+            public static . HttpClientFactory() { }
+            public static . HttpClientFactory(. handler) { }
+        }
+    }
+}

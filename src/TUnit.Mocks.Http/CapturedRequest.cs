@@ -171,9 +171,11 @@ public sealed class CapturedRequest
             return string.Empty;
         }
 
-        if (!uri.IsAbsoluteUri)
+        if (!uri.IsAbsoluteUri || uri.IsFile)
         {
-            return uri.OriginalString;
+            // Relative URIs (and, on Unix, rooted paths that Uri parses as file URIs)
+            // have no user information, but may still carry credentials in parameters.
+            return RedactRelativeUri(uri.OriginalString);
         }
 
         var builder = new StringBuilder();
@@ -207,10 +209,34 @@ public sealed class CapturedRequest
 
         if (UriValuedHeaderNames.Contains(name))
         {
-            return string.Join(", ", values.Select(v => Uri.TryCreate(v, UriKind.Absolute, out var uri) ? FormatUri(uri) : v));
+            return string.Join(", ", values.Select(FormatUriString));
         }
 
         return string.Join(", ", values);
+    }
+
+    private static string FormatUriString(string value)
+        => Uri.TryCreate(value, UriKind.Absolute, out var uri) && !uri.IsFile
+            ? FormatUri(uri)
+            : RedactRelativeUri(value);
+
+    private static string RedactRelativeUri(string value)
+    {
+        var fragment = string.Empty;
+        var fragmentStart = value.IndexOf('#');
+        if (fragmentStart >= 0)
+        {
+            fragment = "#" + RedactParameters(value.Substring(fragmentStart + 1));
+            value = value.Substring(0, fragmentStart);
+        }
+
+        var queryStart = value.IndexOf('?');
+        if (queryStart >= 0)
+        {
+            value = value.Substring(0, queryStart) + "?" + RedactParameters(value.Substring(queryStart + 1));
+        }
+
+        return value + fragment;
     }
 
     private static string RedactParameters(string parameters)

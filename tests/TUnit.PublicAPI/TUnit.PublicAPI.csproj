@@ -35,6 +35,7 @@
 
     <ItemGroup Condition="'$(TargetFramework)' != 'net472'">
       <ProjectReference Include="..\..\src\TUnit.OpenTelemetry\TUnit.OpenTelemetry.csproj" />
+      <ProjectReference Include="..\..\src\TUnit.Mocks.Http\TUnit.Mocks.Http.csproj" />
     </ItemGroup>
 
     <!-- No transitive version pin needed: each referenced project (TUnit.Core, TUnit.Assertions,

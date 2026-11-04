@@ -144,6 +144,37 @@ public class RequestJournalTests
     }
 
     [Test]
+    public async Task DescribeRequests_RedactsCredentialsInsideRelativeUriValuedHeaders()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation("Referer", $"/callback?access_token={AccessToken}&step=2#sig={AccessToken}");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Referer: /callback?access_token=[REDACTED]&step=2#sig=[REDACTED]");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
+    public async Task DescribeRequests_RedactsCredentialsInRelativeRequestUri()
+    {
+        // Invoke the handler directly so the request URI is never resolved against a base address.
+        var handler = Mock.HttpHandler();
+        using var invoker = new HttpMessageInvoker(handler);
+        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri($"{AmDataPath}?api_key={AccessToken}", UriKind.Relative));
+
+        using var _ = await invoker.SendAsync(request, CancellationToken.None);
+
+        var journal = handler.DescribeRequests();
+
+        await Assert.That(journal).Contains($"GET {AmDataPath}?api_key=[REDACTED] (UNMATCHED)");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+    }
+
+    [Test]
     public async Task VerifyNoUnmatchedRequests_UnmatchedListRedactsQueryCredentials()
     {
         using var client = Mock.HttpClient("http://localhost");
