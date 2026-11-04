@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace TUnit.Mocks.Http;
 
 /// <summary>
@@ -44,6 +46,44 @@ public sealed class CapturedRequest
                 headers[h.Key] = h.Value.ToList();
         }
         Headers = headers;
+    }
+
+    /// <summary>
+    /// Maximum number of body characters included by <see cref="ToDiagnosticString"/>.
+    /// Longer bodies are truncated. Default is 2048.
+    /// </summary>
+    public static int MaxDiagnosticBodyLength = 2048;
+
+    /// <summary>
+    /// Returns a multi-line description of the request, including its timestamp,
+    /// match status, headers and body. Intended for test failure diagnostics.
+    /// </summary>
+    public string ToDiagnosticString()
+    {
+        var builder = new StringBuilder();
+        builder.Append('[').Append(Timestamp.ToLocalTime().ToString()).Append("] ");
+        builder.Append(Method).Append(' ').Append(RequestUri);
+        builder.Append(Matched ? " (matched)" : " (UNMATCHED)");
+
+        foreach (var header in Headers)
+        {
+            builder.AppendLine()
+                .Append("    ")
+                .Append(header.Key)
+                .Append(": ")
+                .Append(string.Join(", ", header.Value));
+        }
+
+        if (!string.IsNullOrEmpty(Body))
+        {
+            var body = Body.Length > MaxDiagnosticBodyLength
+                ? Body.Substring(0, MaxDiagnosticBodyLength) + "..."
+                : Body;
+
+            builder.AppendLine().Append("    Body: ").Append(body);
+        }
+
+        return builder.ToString();
     }
 
     /// <inheritdoc />

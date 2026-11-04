@@ -132,7 +132,7 @@ public sealed class MockHttpHandler : HttpMessageHandler
                 matcher.Describe(),
                 times,
                 matching,
-                Requests.Select(r => r.ToString()).ToList(),
+                Requests.Select(r => r.ToDiagnosticString()).ToList(),
                 null);
         }
     }
@@ -147,8 +147,25 @@ public sealed class MockHttpHandler : HttpMessageHandler
         {
             throw new MockVerificationException(
                 $"VerifyNoUnmatchedRequests failed. {unmatched.Count} request(s) did not match any setup:\n" +
-                string.Join("\n", unmatched.Select(r => $"  - {r}")));
+                string.Join("\n", unmatched.Select(r => $"  - {r}")) +
+                "\n\nRequest journal:\n" + DescribeRequests());
         }
+    }
+
+    /// <summary>
+    /// Returns a human-readable journal of every captured request, in the order
+    /// it was received, including headers and bodies. Useful when a test fails
+    /// and you need to see exactly what the code under test sent.
+    /// </summary>
+    public string DescribeRequests()
+    {
+        var requests = Requests;
+        if (requests.Count == 0)
+        {
+            return "(no requests captured)";
+        }
+
+        return string.Join("\n", requests.Select((r, i) => $"#{i + 1} {r.ToDiagnosticString()}"));
     }
 
     /// <summary>Clears all setups and captured requests.</summary>
