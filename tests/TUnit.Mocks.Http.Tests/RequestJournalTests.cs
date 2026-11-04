@@ -176,6 +176,22 @@ public class RequestJournalTests
     }
 
     [Test]
+    public async Task DescribeRequests_RedactsUserInfoInNetworkPathHeaders()
+    {
+        using var client = Mock.HttpClient("http://localhost");
+        using var request = new HttpRequestMessage(HttpMethod.Get, AmDataPath);
+        request.Headers.TryAddWithoutValidation("Referer", $"//provisioner:{AccessToken}@portal.test/callback?step=2");
+
+        await client.SendAsync(request);
+
+        var journal = client.Handler.DescribeRequests();
+
+        await Assert.That(journal).Contains("Referer: //[REDACTED]@portal.test/callback?step=2");
+        await Assert.That(journal).DoesNotContain(AccessToken);
+        await Assert.That(journal).DoesNotContain("provisioner");
+    }
+
+    [Test]
     public async Task DescribeRequests_LeavesNonUriHeaderValuesUnchanged()
     {
         using var client = Mock.HttpClient("http://localhost");

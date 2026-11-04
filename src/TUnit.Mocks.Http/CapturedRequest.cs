@@ -206,6 +206,7 @@ public sealed class CapturedRequest
 
     private static bool LooksLikeUri(string value)
         => value.Contains("://", StringComparison.Ordinal)
+            || value.StartsWith("//", StringComparison.Ordinal)
             || value.IndexOf('?') >= 0
             || value.IndexOf('#') >= 0;
 
@@ -216,6 +217,8 @@ public sealed class CapturedRequest
 
     private static string RedactRelativeUri(string value)
     {
+        value = RedactNetworkPathUserInfo(value);
+
         var fragment = string.Empty;
         var fragmentStart = value.IndexOf('#');
         if (fragmentStart >= 0)
@@ -231,6 +234,29 @@ public sealed class CapturedRequest
         }
 
         return value + fragment;
+    }
+
+    /// <summary>
+    /// A network-path reference (<c>//user:password@host/path</c>, RFC 3986 section 4.2)
+    /// has an authority but no scheme, so it can still carry user information.
+    /// </summary>
+    private static string RedactNetworkPathUserInfo(string value)
+    {
+        if (!value.StartsWith("//", StringComparison.Ordinal))
+        {
+            return value;
+        }
+
+        var authorityEnd = value.IndexOfAny(['/', '?', '#'], 2);
+        if (authorityEnd < 0)
+        {
+            authorityEnd = value.Length;
+        }
+
+        var userInfoEnd = value.LastIndexOf('@', authorityEnd - 1, authorityEnd - 2);
+        return userInfoEnd < 0
+            ? value
+            : "//" + Redacted + value.Substring(userInfoEnd);
     }
 
     private static string RedactParameters(string parameters)
